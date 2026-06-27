@@ -1,0 +1,145 @@
+{
+  "title": "Spark Streaming Pipeline",
+  "uid": "spark-pipeline",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Comments Processed",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS value FROM ml_results",
+          "format": "table"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2,
+      "type": "piechart",
+      "title": "Prediction Distribution",
+      "gridPos": { "x": 6, "y": 0, "w": 9, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) AS high, SUM(CASE WHEN sentiment = 'low' THEN 1 ELSE 0 END) AS low FROM ml_results WHERE sentiment IS NOT NULL",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Comments by Subreddit",
+      "gridPos": { "x": 15, "y": 0, "w": 9, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT subreddit, COUNT(*) AS total, SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) AS high_count FROM ml_results WHERE subreddit IS NOT NULL GROUP BY subreddit ORDER BY total DESC LIMIT 10",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Comments per Minute",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('minute', processed_at) AS time, COUNT(*) AS value FROM ml_results WHERE $__timeFilter(processed_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Prediction Confidence Over Time",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('minute', processed_at) AS time, AVG(score) AS \"avg_confidence\" FROM ml_results WHERE $__timeFilter(processed_at) AND score IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "barchart",
+      "title": "H1: Do longer comments score higher? (by word count)",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN wc < 10 THEN '0-10' WHEN wc < 25 THEN '10-25' WHEN wc < 50 THEN '25-50' WHEN wc < 100 THEN '50-100' ELSE '100+' END AS bucket, ROUND(100.0 * SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_high FROM (SELECT sentiment, length(btrim(text)) - length(replace(btrim(text), ' ', '')) + 1 AS wc FROM ml_results WHERE sentiment IS NOT NULL) t GROUP BY 1 ORDER BY MIN(wc)",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "H2: Do question comments score higher? (ending with ?)",
+      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN text LIKE '%?' THEN 'ends with ?' ELSE 'no question mark' END AS metric, ROUND(100.0 * SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_high FROM ml_results WHERE sentiment IS NOT NULL GROUP BY 1",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 8,
+      "type": "barchart",
+      "title": "H3: Do exclamation comments score higher? (containing !)",
+      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN text LIKE '%!%' THEN 'has !' ELSE 'no !' END AS metric, ROUND(100.0 * SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_high FROM ml_results WHERE sentiment IS NOT NULL GROUP BY 1",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 9,
+      "type": "barchart",
+      "title": "H4: Do first-person comments score higher? (mentions I/me/my)",
+      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN text ~* '\\m(i|me|my|mine|myself)\\M' THEN 'first person' ELSE 'impersonal' END AS metric, ROUND(100.0 * SUM(CASE WHEN sentiment = 'high' THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_high FROM ml_results WHERE sentiment IS NOT NULL GROUP BY 1",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Latest Results",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT processed_at, subreddit, text, sentiment, ROUND(score::numeric, 3) AS confidence FROM ml_results ORDER BY processed_at DESC LIMIT 20",
+          "format": "table"
+        }
+      ]
+    }
+  ]
+}
