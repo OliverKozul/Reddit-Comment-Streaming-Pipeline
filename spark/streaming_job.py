@@ -91,7 +91,7 @@ def main():
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_SERVERS)
         .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "latest")
+        .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
         .option("maxOffsetsPerTrigger", 2000)
         .load()

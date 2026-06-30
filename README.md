@@ -1,25 +1,24 @@
 # Reddit Comment Streaming Pipeline
 
-A containerized real-time pipeline that streams Reddit comments through Kafka into a Spark Structured Streaming job, classifies each comment as a high or low performer, stores the results in PostgreSQL, and visualizes them in a live Grafana dashboard.
+A containerized real-time pipeline that streams Reddit comments through Kafka into a Spark Structured Streaming job, classifies each comment as a high or low performer with a SparkML model, stores the results in PostgreSQL, and visualizes them in a live Grafana dashboard.
 
 ## Setup
 
-**1. Train the model**
-
-A pre-trained model is included at `models/comment_scorer.pkl`, so this step is optional. To retrain it, download the data from [Kaggle](https://www.kaggle.com/datasets/smagnan/1-million-reddit-comments-from-40-subreddits), save it to `train/reddit_comments.csv`, and run:
-
-```bash
-pip install -r train/requirements.txt
-python train/train.py
-```
-
-This overwrites `models/comment_scorer.pkl`.
-
-**2. Configure environment**
+**1. Configure environment**
 
 ```bash
 cp .env.example .env
 ```
+
+**2. Train the model**
+
+The training data is included at `data/askreddit-comments.parquet` (~25k r/AskReddit comments with real upvote scores, filtered from the Kaggle [1M Reddit comments](https://www.kaggle.com/datasets/smagnan/1-million-reddit-comments-from-40-subreddits) dataset). Train the model once (held-out 80/20 accuracy is printed, model written to `models/comment_scorer/`):
+
+```bash
+docker-compose run --rm train
+```
+
+The producer replays the same parquet into Kafka, so no dataset download is needed.
 
 **3. Start the stack**
 

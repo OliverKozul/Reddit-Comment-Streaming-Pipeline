@@ -1,84 +1,95 @@
 import os
-import pickle
+import sys
+
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 import pandas as pd
-from sklearn.pipeline import Pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
+from pyspark.sql import SparkSession
 
-TRAIN_CSV          = os.environ.get("TRAIN_CSV", "train/reddit_comments.csv")
-TRAIN_SAMPLE_SIZE = int(os.environ.get("TRAIN_SAMPLE_SIZE", "10000"))
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import RegexTokenizer, NGram, HashingTF, IDF, VectorAssembler
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
+TRAIN_DATA        = os.environ.get("TRAIN_DATA", "data/askreddit-train.parquet")
+MODEL_OUTPUT_PATH = os.environ.get("MODEL_OUTPUT_PATH", "models/comment_scorer")
+TRAIN_SAMPLE_SIZE = int(os.environ.get("TRAIN_SAMPLE_SIZE", "50000"))
 LOW_PCT           = float(os.environ.get("LOW_PCT", "0.35"))
 HIGH_PCT          = float(os.environ.get("HIGH_PCT", "0.80"))
-MODEL_OUTPUT_PATH = os.environ.get("MODEL_OUTPUT_PATH", "models/comment_scorer.pkl")
 SEED              = 42
+TEXT_COLUMN       = "body"
+SCORE_COLUMN      = "score"
 
 
-def load_comments():
-    if not os.path.exists(TRAIN_CSV):
-        raise RuntimeError(
-            f"Training CSV not found at '{TRAIN_CSV}'.\n"
-            "Download it from "
-            "https://www.kaggle.com/datasets/smagnan/1-million-reddit-comments-from-40-subreddits\n"
-            f"and save it to '{TRAIN_CSV}' (or set TRAIN_CSV)."
-        )
-    df = pd.read_csv(TRAIN_CSV, usecols=["body", "score"])
-    df = df.rename(columns={"body": "text"})
+def load_comments(spark, path):
+    df = spark.read.parquet(path).select(TEXT_COLUMN, SCORE_COLUMN).toPandas()
+    df = df.rename(columns={TEXT_COLUMN: "text", SCORE_COLUMN: "score"})
     df["text"] = df["text"].astype(str)
     df = df[~df["text"].isin(["[deleted]", "[removed]", "nan", ""])]
     df = df.dropna(subset=["score"])
     df["score"] = df["score"].astype(int)
-    print(f"Loaded {len(df)} comments from {TRAIN_CSV}")
+    print(f"Loaded {len(df)} comments from {path}")
     return df
 
 
-def label_extremes(df):
+def thresholds(df):
     low_thr = df["score"].quantile(LOW_PCT, interpolation="lower")
     high_thr = df["score"].quantile(HIGH_PCT, interpolation="lower")
     if low_thr >= high_thr:
         high_thr = low_thr + 1
+    return low_thr, high_thr
 
+
+def label_extremes(df, low_thr, high_thr, max_per_class):
     low = df[df["score"] <= low_thr]
     high = df[df["score"] >= high_thr]
-    n = min(len(low), len(high), TRAIN_SAMPLE_SIZE)
-    low = low.sample(n, random_state=SEED)
-    high = high.sample(n, random_state=SEED)
-    print(f"Labels: {n} low (score <= {low_thr}) / {n} high (score >= {high_thr})")
-
-    texts = pd.concat([low["text"], high["text"]]).tolist()
-    labels = [0] * n + [1] * n
-    return texts, labels
+    n = min(len(low), len(high), max_per_class)
+    low = low.sample(n, random_state=SEED)[["text"]].assign(label=0.0)
+    high = high.sample(n, random_state=SEED)[["text"]].assign(label=1.0)
+    print(f"  {n} low (score <= {low_thr}) / {n} high (score >= {high_thr})")
+    return pd.concat([low, high]).sample(frac=1, random_state=SEED).reset_index(drop=True)
 
 
 def build_pipeline():
-    return Pipeline([
-        ("tfidf", TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(3, 5),
-            max_features=20000,
-            min_df=5,
-            sublinear_tf=True,
-        )),
-        ("clf", LogisticRegression(max_iter=2000, C=1.0, n_jobs=-1)),
+    return Pipeline(stages=[
+        RegexTokenizer(inputCol="text", outputCol="chars", pattern=r"[a-z\s!?.]", gaps=False, toLowercase=True),
+        NGram(n=3, inputCol="chars", outputCol="cg3"),
+        NGram(n=4, inputCol="chars", outputCol="cg4"),
+        NGram(n=5, inputCol="chars", outputCol="cg5"),
+        HashingTF(inputCol="cg3", outputCol="tf3", numFeatures=20000),
+        HashingTF(inputCol="cg4", outputCol="tf4", numFeatures=20000),
+        HashingTF(inputCol="cg5", outputCol="tf5", numFeatures=20000),
+        IDF(inputCol="tf3", outputCol="idf3"),
+        IDF(inputCol="tf4", outputCol="idf4"),
+        IDF(inputCol="tf5", outputCol="idf5"),
+        VectorAssembler(inputCols=["idf3", "idf4", "idf5"], outputCol="features"),
+        LogisticRegression(maxIter=200, regParam=0.01, labelCol="label", featuresCol="features"),
     ])
 
 
 def main():
-    df = load_comments()
-    texts, labels = label_extremes(df)
-    X_train, X_test, y_train, y_test = train_test_split(
-        texts, labels, test_size=0.2, random_state=SEED, stratify=labels
-    )
-    model = build_pipeline()
-    model.fit(X_train, y_train)
-    print(classification_report(y_test, model.predict(X_test), target_names=["low", "high"]))
+    spark = SparkSession.builder.appName("train").master("local[*]").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+
+    df_pd = load_comments(spark, TRAIN_DATA)
+    low_thr, high_thr = thresholds(df_pd)
+    labeled = label_extremes(df_pd, low_thr, high_thr, TRAIN_SAMPLE_SIZE)
+
+    df = spark.createDataFrame(labeled)
+    train_df, test_df = df.randomSplit([0.8, 0.2], seed=SEED)
+
+    model = build_pipeline().fit(train_df)
+
+    predictions = model.transform(test_df)
+    evaluator = MulticlassClassificationEvaluator(labelCol="label", metricName="accuracy")
+    accuracy = evaluator.evaluate(predictions)
+    print(f"Accuracy: {accuracy:.3f}")
 
     os.makedirs(os.path.dirname(MODEL_OUTPUT_PATH), exist_ok=True)
-    with open(MODEL_OUTPUT_PATH, "wb") as f:
-        pickle.dump(model, f)
+    model.write().overwrite().save(MODEL_OUTPUT_PATH)
     print(f"Model saved to {MODEL_OUTPUT_PATH}")
+    spark.stop()
 
 
 if __name__ == "__main__":
